@@ -346,15 +346,19 @@ class MindMapApp:
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
 
-        # Fullscreen
+        # Fullscreen without forcing always-on-top
         self.root.geometry(f"{screen_width}x{screen_height}+0+0")
-        self.root.attributes("-fullscreen", True)
+
+        # Don't use -fullscreen as it blocks alt-tab
+        # Instead use overrideredirect for borderless window
+        self.root.overrideredirect(False)  # Keep window decorations for now
 
         # Transparency (0.9 alpha) - makes window see-through
         self.root.attributes("-alpha", 0.9)
 
-        # Keep on top
-        self.root.attributes("-topmost", True)
+        # DON'T keep on top - allow alt-tab and switching to other apps
+        # Window will come to front when clicked due to normal window behavior
+        # self.root.attributes("-topmost", True)  # REMOVED
 
         # Light gray background - with 90% transparency, desktop shows through
         # Using systemTransparent for better platform compatibility
@@ -421,10 +425,10 @@ class MindMapApp:
         help_menu.add_command(label="Keyboard Shortcuts", command=self.show_help, accelerator="F1")
 
     def show_dialog_topmost(self, dialog_func, *args, **kwargs):
-        """Helper to show dialogs properly on top of transparent window"""
-        self.root.attributes("-topmost", False)
+        """Helper to show dialogs properly - ensures dialogs appear in front"""
+        # No need to toggle topmost since we're not using it anymore
+        # Just call the dialog function directly
         result = dialog_func(*args, **kwargs)
-        self.root.attributes("-topmost", True)
         return result
 
     def setup_bindings(self):
@@ -456,6 +460,8 @@ class MindMapApp:
         self.root.bind("<F1>", lambda e: self.show_help())
         self.root.bind("<F5>", lambda e: self.refresh_auto_links())
         self.root.bind("<Escape>", lambda e: self.clear_selection())
+        self.root.bind("<Control-q>", lambda e: self.exit_app())
+        self.root.bind("<Control-w>", lambda e: self.minimize_window())
 
     # ========================================================================
     # DRAWING METHODS
@@ -2097,6 +2103,10 @@ Other:
         text_widget.config(state=tk.DISABLED)
 
         tk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=10)
+
+    def minimize_window(self):
+        """Minimize/iconify the window to get it out of the way"""
+        self.root.iconify()
 
     def exit_app(self):
         """Exit application"""
