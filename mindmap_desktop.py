@@ -356,17 +356,21 @@ class MindMapApp:
         # Keep on top
         self.root.attributes("-topmost", True)
 
-        # Transparent background - no solid color blocking desktop view
-        # Empty string allows transparency to show through
-        self.root.configure(bg='')
+        # Light gray background - with 90% transparency, desktop shows through
+        # Using systemTransparent for better platform compatibility
+        try:
+            self.root.configure(bg='systemTransparent')
+        except:
+            # Fallback for systems that don't support systemTransparent
+            self.root.configure(bg='#F0F0F0')
 
     def setup_canvas(self):
         """Initialize canvas"""
-        # Canvas with NO background - allows desktop to show through
+        # Canvas with light background - combined with window alpha, desktop shows through
+        # Light gray that becomes mostly transparent with the window's alpha setting
         self.canvas = tk.Canvas(
             self.root,
-            highlightthickness=0,
-            bg=''  # Transparent canvas background
+            highlightthickness=0
         )
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
