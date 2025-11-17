@@ -350,21 +350,23 @@ class MindMapApp:
         self.root.geometry(f"{screen_width}x{screen_height}+0+0")
         self.root.attributes("-fullscreen", True)
 
-        # Transparency (0.9 alpha)
+        # Transparency (0.9 alpha) - makes window see-through
         self.root.attributes("-alpha", 0.9)
 
         # Keep on top
         self.root.attributes("-topmost", True)
 
-        # Background color
-        self.root.configure(bg="#E0E0E0")
+        # Transparent background - no solid color blocking desktop view
+        # Empty string allows transparency to show through
+        self.root.configure(bg='')
 
     def setup_canvas(self):
         """Initialize canvas"""
+        # Canvas with NO background - allows desktop to show through
         self.canvas = tk.Canvas(
             self.root,
-            bg="#F5F5F5",
-            highlightthickness=0
+            highlightthickness=0,
+            bg=''  # Transparent canvas background
         )
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
@@ -413,6 +415,13 @@ class MindMapApp:
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="Keyboard Shortcuts", command=self.show_help, accelerator="F1")
+
+    def show_dialog_topmost(self, dialog_func, *args, **kwargs):
+        """Helper to show dialogs properly on top of transparent window"""
+        self.root.attributes("-topmost", False)
+        result = dialog_func(*args, **kwargs)
+        self.root.attributes("-topmost", True)
+        return result
 
     def setup_bindings(self):
         """Setup event bindings"""
@@ -1262,11 +1271,13 @@ class MindMapApp:
 
         node = self.nodes[node_id]
 
-        # Show edit dialog
-        new_content = simpledialog.askstring(
+        # Show edit dialog (using helper to ensure it appears on top)
+        new_content = self.show_dialog_topmost(
+            simpledialog.askstring,
             "Edit Node",
             "Enter node content:",
-            initialvalue=node.content
+            initialvalue=node.content,
+            parent=self.root
         )
 
         if new_content is not None:
@@ -1352,12 +1363,14 @@ class MindMapApp:
 
         node = self.nodes[node_id]
 
-        new_tier = simpledialog.askinteger(
+        new_tier = self.show_dialog_topmost(
+            simpledialog.askinteger,
             "Change Tier",
             "Enter new tier (1-5):",
             initialvalue=node.tier,
             minvalue=1,
-            maxvalue=5
+            maxvalue=5,
+            parent=self.root
         )
 
         if new_tier is not None:
@@ -1395,12 +1408,14 @@ class MindMapApp:
                 return
 
         # Ask for weight
-        weight = simpledialog.askinteger(
+        weight = self.show_dialog_topmost(
+            simpledialog.askinteger,
             "Connection Weight",
             "Enter connection weight (1-10):\n1=max slack, 10=tight",
             initialvalue=5,
             minvalue=1,
-            maxvalue=10
+            maxvalue=10,
+            parent=self.root
         )
 
         if weight is None:
@@ -1813,7 +1828,12 @@ class MindMapApp:
 
     def search_nodes(self):
         """Search for nodes by content"""
-        query = simpledialog.askstring("Search", "Enter search query:")
+        query = self.show_dialog_topmost(
+            simpledialog.askstring,
+            "Search",
+            "Enter search query:",
+            parent=self.root
+        )
 
         if not query:
             return
