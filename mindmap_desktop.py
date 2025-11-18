@@ -361,11 +361,19 @@ class MindMapApp:
         # Window setup
         self.setup_window()
 
+        # NEW: Load settings first
+        self.settings = AppSettings.load()
+
+        # NEW: Initialize theme and layout systems
+        self.theme_registry = ThemeRegistry()
+        self.theme_registry.set_current(self.settings.current_theme)
+        self.layout_engine = LayoutEngine()
+
         # Data structures
         self.nodes = {}  # node_id -> MindMapNode
         self.connections = {}  # conn_id -> Connection
         self.selected_nodes = []
-        self.cabinet = FileCabinet(50, 50)
+        self.cabinet = FileCabinet(self.settings.cabinet_x, self.settings.cabinet_y)
 
         # State variables
         self.drag_data = {"x": 0, "y": 0, "item": None, "type": None}
@@ -374,8 +382,12 @@ class MindMapApp:
         self.canvas_offset = {"x": 0, "y": 0}
         self.zoom_factor = 1.0
         self.current_file = None
-        self.auto_save_enabled = True
-        self.theme = "default"
+        self.auto_save_enabled = self.settings.auto_save_enabled
+        self.theme = self.settings.current_theme
+
+        # NEW: Grid system
+        self.grid_enabled = self.settings.snap_to_grid
+        self.grid_spacing = self.settings.grid_spacing
 
         # Manila folder state
         self.manila_folder_open = None  # None, "projects", or "settings"
@@ -385,16 +397,16 @@ class MindMapApp:
         self.undo_stack = deque(maxlen=50)
         self.redo_stack = deque(maxlen=50)
 
+        # NEW: Auto-save timer reference
+        self.auto_save_timer_id = None
+
         # UI setup
         self.setup_canvas()
         self.setup_menu()
         self.setup_bindings()
 
         # Start auto-save timer
-        self.auto_save_timer()
-
-        # Initial draw
-        self.redraw_all()
+        self.setup_auto_save()
 
         print("MindMap Desktop Application started successfully")
         print("Press Ctrl+N to create your first node")
@@ -521,6 +533,7 @@ class MindMapApp:
         self.root.bind("<Escape>", lambda e: self.clear_selection())
         self.root.bind("<Control-q>", lambda e: self.exit_app())
         self.root.bind("<Control-w>", lambda e: self.minimize_window())
+        self.root.bind("<Control-g>", lambda e: self.toggle_grid())
 
     # ========================================================================
     # DRAWING METHODS
@@ -549,66 +562,54 @@ class MindMapApp:
         self.update_status()
 
     def draw_node(self, node):
-        """Draw a single node"""
+        """Draw a single node using theme system"""
         if node.collapsed and node.parent_id:
             return  # Don't draw collapsed child nodes
 
-        width, height = node.get_size()
-        x1 = node.x - width // 2
-        y1 = node.y - height // 2
-        x2 = node.x + width // 2
-        y2 = node.y + height // 2
+        # Clear old canvas items for this node
+        for item_id in node.canvas_items:
+            try:
+                self.canvas.delete(item_id)
+            except:
+                pass
+        node.canvas_items.clear()
 
-        # Color scheme based on theme
-        if self.theme == "dark":
-            fill_color = self.get_gradient_color("#424242", "#BDBDBD", node.tier / 5.0)
-        else:
-            fill_color = self.get_gradient_color("#E3F2FD", "#42A5F5", node.tier / 5.0)
+        # Get current theme and calculate tier
+        theme = self.theme_registry.get_current()
+        visual_tier = node.calculate_tier()
 
-        # Draw node rectangle
-        outline_color = "#FF9800" if node.id in self.selected_nodes else "#1976D2"
-        outline_width = 3 if node.id in self.selected_nodes else 1
+        # Get style from theme
+        style = theme.get_node_style(visual_tier, node.completed)
 
-        self.canvas.create_rectangle(
-            x1, y1, x2, y2,
-            fill=fill_color,
-            outline=outline_color,
-            width=outline_width,
-            tags=(f"node_{node.id}", "node")
-        )
+        # Create tags with selection highlight
+        base_tags = (f"node_{node.id}", "node")
 
-        # Draw text
-        self.canvas.create_text(
+        # Draw node using theme
+        items = theme.draw_node(
+            self.canvas,
             node.x, node.y,
-            text=node.get_display_text(),
-            font=("Arial", 10, "bold"),
-            fill="#212121",
-            tags=(f"node_{node.id}", "node")
+            style,
+            node.content,
+            base_tags
         )
 
-        # Draw tier badge
-        badge_size = 16
-        badge_x = x2 - badge_size - 2
-        badge_y = y1 + 2
+        # Store canvas item IDs
+        node.canvas_items = items
 
-        self.canvas.create_oval(
-            badge_x, badge_y,
-            badge_x + badge_size, badge_y + badge_size,
-            fill="#FFC107",
-            outline="#F57C00",
-            tags=(f"node_{node.id}", "node")
-        )
-
-        self.canvas.create_text(
-            badge_x + badge_size // 2, badge_y + badge_size // 2,
-            text=str(node.tier),
-            font=("Arial", 8, "bold"),
-            fill="#212121",
-            tags=(f"node_{node.id}", "node")
-        )
+        # Add selection highlight if selected
+        if node.id in self.selected_nodes:
+            width, height = style.width, style.height
+            highlight = self.canvas.create_rectangle(
+                node.x - width//2 - 3, node.y - height//2 - 3,
+                node.x + width//2 + 3, node.y + height//2 + 3,
+                outline="#FF9800",
+                width=3,
+                tags=base_tags
+            )
+            node.canvas_items.insert(0, highlight)  # Add to front
 
     def draw_connection(self, conn):
-        """Draw a connection between nodes"""
+        """Draw a connection between nodes using theme system"""
         # Get nodes
         from_node = self.nodes.get(conn.from_node_id)
         to_node = self.nodes.get(conn.to_node_id)
@@ -620,44 +621,22 @@ class MindMapApp:
         x1, y1 = from_node.x, from_node.y
         x2, y2 = to_node.x, to_node.y
 
-        # Line style
-        color = conn.get_color()
-        width = int(conn.get_width())
-        dash = (5, 5) if conn.type == "reference" else ()
+        # Get current theme
+        theme = self.theme_registry.get_current()
+        connection_style = theme.get_connection_style()
 
-        # Draw with sag if applicable
-        if conn.is_slack():
-            sag = conn.get_sag_amount()
-            # Calculate midpoint with sag (catenary approximation)
-            mid_x = (x1 + x2) / 2
-            mid_y = (y1 + y2) / 2 + sag
+        # Override color for reference connections
+        if conn.type == "reference":
+            connection_style.color = "#FF9800"  # Orange for reference links
 
-            # Draw curved line using multiple segments
-            self.canvas.create_line(
-                x1, y1, mid_x, mid_y,
-                fill=color,
-                width=width,
-                dash=dash,
-                smooth=True,
-                tags=(f"conn_{conn.id}", "connection")
-            )
-            self.canvas.create_line(
-                mid_x, mid_y, x2, y2,
-                fill=color,
-                width=width,
-                dash=dash,
-                smooth=True,
-                tags=(f"conn_{conn.id}", "connection")
-            )
-        else:
-            # Straight line
-            self.canvas.create_line(
-                x1, y1, x2, y2,
-                fill=color,
-                width=width,
-                dash=dash,
-                tags=(f"conn_{conn.id}", "connection")
-            )
+        # Draw connection using theme
+        tags = (f"conn_{conn.id}", "connection")
+        theme.draw_connection(
+            self.canvas,
+            x1, y1, x2, y2,
+            connection_style,
+            tags
+        )
 
     def draw_cabinet(self):
         """Draw file cabinet"""
@@ -1038,6 +1017,60 @@ class MindMapApp:
             )
 
     # ========================================================================
+    # GRID SYSTEM
+    # ========================================================================
+
+    def snap_to_grid(self, x, y):
+        """Snap coordinates to grid if enabled"""
+        if not self.grid_enabled:
+            return (x, y)
+
+        spacing = self.grid_spacing
+        snapped_x = round(x / spacing) * spacing
+        snapped_y = round(y / spacing) * spacing
+        return (snapped_x, snapped_y)
+
+    def toggle_grid(self):
+        """Toggle snap-to-grid on/off"""
+        self.grid_enabled = not self.grid_enabled
+        self.settings.snap_to_grid = self.grid_enabled
+        self.settings.save()
+
+        mode = "Grid Snapping ON" if self.grid_enabled else "Grid Snapping OFF"
+        print(f"Snap-to-grid: {mode}")
+
+        # Update status to show grid mode
+        self.update_status()
+
+    # ========================================================================
+    # AUTO-SAVE SYSTEM
+    # ========================================================================
+
+    def setup_auto_save(self):
+        """Setup auto-save timer"""
+        # Cancel existing timer if any
+        if self.auto_save_timer_id:
+            self.root.after_cancel(self.auto_save_timer_id)
+            self.auto_save_timer_id = None
+
+        # Setup new timer if enabled
+        if self.settings.auto_save_enabled and self.settings.auto_save_interval > 0:
+            interval_ms = self.settings.auto_save_interval * 1000  # Convert seconds to ms
+            self.auto_save_timer_id = self.root.after(interval_ms, self.perform_auto_save)
+
+    def perform_auto_save(self):
+        """Perform auto-save and schedule next one"""
+        if self.current_file and self.nodes:
+            try:
+                self.save_to_file(self.current_file)
+                print(f"Auto-saved at {time.strftime('%H:%M:%S')}")
+            except Exception as e:
+                print(f"Auto-save failed: {e}")
+
+        # Schedule next auto-save
+        self.setup_auto_save()
+
+    # ========================================================================
     # EVENT HANDLERS - CRITICAL BUG FIXES APPLIED
     # ========================================================================
 
@@ -1120,30 +1153,41 @@ class MindMapApp:
                     return
 
     def on_canvas_drag(self, event):
-        """Handle canvas drag"""
+        """Handle canvas drag with optional grid snapping"""
         if self.drag_data["item"] is None:
             return
 
-        dx = event.x - self.drag_data["x"]
-        dy = event.y - self.drag_data["y"]
-
         if self.drag_data["type"] == "node":
-            # Move node
+            # Move node with grid snapping
             node_id = self.drag_data["item"]
             if node_id in self.nodes:
-                self.nodes[node_id].x += dx
-                self.nodes[node_id].y += dy
+                node = self.nodes[node_id]
+
+                # Calculate new position
+                new_x = event.x
+                new_y = event.y
+
+                # Apply grid snapping
+                new_x, new_y = self.snap_to_grid(new_x, new_y)
+
+                # Update node position
+                node.x = new_x
+                node.y = new_y
+
                 self.redraw_all()
 
         elif self.drag_data["type"] == "cabinet":
             # Move cabinet
+            dx = event.x - self.drag_data["x"]
+            dy = event.y - self.drag_data["y"]
+
             self.cabinet.x += dx
             self.cabinet.y += dy
             self.cabinet.update_orientation(self.root.winfo_screenwidth())
             self.redraw_all()
 
-        self.drag_data["x"] = event.x
-        self.drag_data["y"] = event.y
+            self.drag_data["x"] = event.x
+            self.drag_data["y"] = event.y
 
     def on_canvas_release(self, event):
         """Handle mouse release"""
@@ -1283,17 +1327,47 @@ class MindMapApp:
         }
 
     def show_node_context_menu(self, node_id, event):
-        """Show context menu for node"""
+        """Show enhanced context menu for node"""
+        if node_id not in self.nodes:
+            return
+
+        node = self.nodes[node_id]
         menu = tk.Menu(self.root, tearoff=0)
 
+        # Basic operations
         menu.add_command(label="Edit", command=lambda: self.edit_node(node_id))
         menu.add_command(label="Add Child", command=lambda: self.add_child_node(node_id))
-        menu.add_command(label="Delete", command=lambda: self.delete_node(node_id))
         menu.add_separator()
+
+        # NEW: Completion tracking
+        completion_label = "Mark Incomplete" if node.completed else "Mark Complete"
+        menu.add_command(label=completion_label, command=lambda: self.toggle_completion(node_id))
+
+        menu.add_separator()
+
+        # NEW: Arrange children submenu (only if has children)
+        if node.children_ids:
+            arrange_menu = tk.Menu(menu, tearoff=0)
+            for layout_name in self.layout_engine.get_available_layouts():
+                arrange_menu.add_command(
+                    label=layout_name.capitalize(),
+                    command=lambda ln=layout_name: self.arrange_children(node_id, ln)
+                )
+            menu.add_cascade(label="Arrange Children", menu=arrange_menu)
+
         menu.add_command(label="Collapse", command=lambda: self.toggle_collapse(node_id))
         menu.add_command(label="Change Tier", command=lambda: self.change_node_tier(node_id))
+
+        menu.add_separator()
+
+        # NEW: Statistics display
+        stats = node.get_statistics(self.nodes)
+        stats_label = f"Stats: {stats['completed']}/{stats['total']} ({stats['percent']:.0f}%)"
+        menu.add_command(label=stats_label, state='disabled')
+
         menu.add_separator()
         menu.add_command(label="Auto-Link Suggestions", command=lambda: self.show_auto_link_suggestions(node_id))
+        menu.add_command(label="Delete", command=lambda: self.delete_node(node_id))
 
         menu.post(event.x_root, event.y_root)
 
@@ -1452,6 +1526,66 @@ class MindMapApp:
         self.selected_nodes = []
         self.linking_mode = False
         self.linking_from_node = None
+
+    def toggle_completion(self, node_id):
+        """Toggle node completion status"""
+        if node_id not in self.nodes:
+            return
+
+        node = self.nodes[node_id]
+        node.completed = not node.completed
+
+        # Save state for undo
+        self.save_undo_state()
+
+        # Redraw to show completion (green tint)
+        self.redraw_all()
+
+        status = "completed" if node.completed else "incomplete"
+        print(f"Node '{node.content}' marked as {status}")
+
+    def arrange_children(self, parent_node_id, layout_name):
+        """Arrange children using specified layout"""
+        if parent_node_id not in self.nodes:
+            return
+
+        parent_node = self.nodes[parent_node_id]
+
+        if not parent_node.children_ids:
+            return
+
+        # Get child nodes
+        children_nodes = [self.nodes[cid] for cid in parent_node.children_ids if cid in self.nodes]
+
+        if not children_nodes:
+            return
+
+        # Get new positions from layout engine
+        canvas_width = self.canvas.winfo_width() or 1200
+        canvas_height = self.canvas.winfo_height() or 800
+
+        new_positions = self.layout_engine.apply_layout(
+            layout_name,
+            parent_node,
+            children_nodes,
+            canvas_width,
+            canvas_height
+        )
+
+        # Apply new positions
+        for child in children_nodes:
+            if child.id in new_positions:
+                new_x, new_y = new_positions[child.id]
+                child.x = new_x
+                child.y = new_y
+
+        # Save state for undo
+        self.save_undo_state()
+
+        # Redraw
+        self.redraw_all()
+
+        print(f"Arranged {len(children_nodes)} children using {layout_name} layout")
 
     # ========================================================================
     # CONNECTION OPERATIONS
@@ -1766,15 +1900,6 @@ class MindMapApp:
                 continue
 
         return False
-
-    def auto_save_timer(self):
-        """Auto-save timer (every 30 seconds)"""
-        if self.auto_save_enabled and self.current_file and self.nodes:
-            self.save_to_file(self.current_file)
-            print("Auto-save completed")
-
-        # Schedule next auto-save
-        self.root.after(30000, self.auto_save_timer)
 
     # ========================================================================
     # UNDO/REDO
