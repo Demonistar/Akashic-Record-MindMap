@@ -15,6 +15,11 @@ import math
 import difflib
 from collections import deque
 
+# Import new theme and layout systems
+from theme_engine import ThemeRegistry
+from layout_engine import LayoutEngine
+from settings import AppSettings
+
 # Optional imports with graceful fallbacks
 try:
     from PIL import Image, ImageTk, ImageDraw
@@ -77,6 +82,12 @@ class MindMapNode:
         self.linked_node_ids = []
         self.meta = {}
 
+        # NEW: Task completion tracking
+        self.completed = False
+
+        # NEW: Canvas item IDs for theme rendering
+        self.canvas_items = []
+
     def get_size(self):
         """Calculate node size based on tier"""
         base_width = 120
@@ -90,6 +101,52 @@ class MindMapNode:
         if len(self.content) <= max_chars:
             return self.content
         return self.content[:max_chars] + "..."
+
+    def calculate_tier(self) -> int:
+        """Calculate tier based on number of children (for theme rendering)"""
+        child_count = len(self.children_ids)
+        if child_count >= 5:
+            return 2  # Large/crypt
+        elif child_count >= 2:
+            return 1  # Medium
+        else:
+            return 0  # Small
+
+    def get_statistics(self, nodes_dict) -> dict:
+        """Get completion statistics for this node and all descendants"""
+        def count_nodes(node_id):
+            if node_id not in nodes_dict:
+                return {'total': 0, 'completed': 0}
+
+            node = nodes_dict[node_id]
+            total = 1
+            completed = 1 if node.completed else 0
+
+            for child_id in node.children_ids:
+                child_stats = count_nodes(child_id)
+                total += child_stats['total']
+                completed += child_stats['completed']
+
+            return {'total': total, 'completed': completed}
+
+        stats = count_nodes(self.id)
+        stats['remaining'] = stats['total'] - stats['completed']
+        if stats['total'] > 0:
+            stats['percent'] = (stats['completed'] / stats['total']) * 100
+        else:
+            stats['percent'] = 0
+
+        return stats
+
+    def get_all_descendants(self, nodes_dict) -> list:
+        """Get all descendant node IDs (children, grandchildren, etc.)"""
+        descendants = []
+        for child_id in self.children_ids:
+            if child_id in nodes_dict:
+                descendants.append(child_id)
+                child_node = nodes_dict[child_id]
+                descendants.extend(child_node.get_all_descendants(nodes_dict))
+        return descendants
 
     def to_dict(self):
         """Convert to dictionary for JSON serialization"""
@@ -108,7 +165,8 @@ class MindMapNode:
             "tags": self.tags,
             "emotion": self.emotion,
             "linked_node_ids": self.linked_node_ids,
-            "meta": self.meta
+            "meta": self.meta,
+            "completed": self.completed
         }
 
     @staticmethod
@@ -131,6 +189,7 @@ class MindMapNode:
         node.emotion = data.get("emotion", "neutral")
         node.linked_node_ids = data.get("linked_node_ids", [])
         node.meta = data.get("meta", {})
+        node.completed = data.get("completed", False)
         return node
 
 
