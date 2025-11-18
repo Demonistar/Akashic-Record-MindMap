@@ -266,6 +266,10 @@ class FileCabinet:
         self.drawer_height = 40
         self.drawer_slide_amount = 25
 
+        # Animation state
+        self.animated_drawer = None  # Which drawer is currently animating
+        self.animation_frame = 0  # Current animation frame
+
     def get_bounds(self):
         """Get cabinet boundary rectangle"""
         return (self.x, self.y, self.x + self.width, self.y + self.height)
@@ -399,6 +403,12 @@ class MindMapApp:
 
         # NEW: Auto-save timer reference
         self.auto_save_timer_id = None
+
+        # NEW: In-place edit overlay reference
+        self.edit_overlay = None
+
+        # NEW: Drag-drop reparenting state
+        self.drop_target_node = None  # Node currently being hovered over during drag
 
         # UI setup
         self.setup_canvas()
@@ -534,14 +544,40 @@ class MindMapApp:
         self.root.bind("<Control-q>", lambda e: self.exit_app())
         self.root.bind("<Control-w>", lambda e: self.minimize_window())
         self.root.bind("<Control-g>", lambda e: self.toggle_grid())
+        self.root.bind("<Control-G>", lambda e: self.toggle_grid_overlay())  # Shift+Ctrl+G for overlay
 
     # ========================================================================
     # DRAWING METHODS
     # ========================================================================
 
+    def draw_grid_overlay(self):
+        """Draw grid overlay showing snap points"""
+        canvas_width = self.root.winfo_screenwidth()
+        canvas_height = self.root.winfo_screenheight()
+        spacing = self.grid_spacing
+
+        # Draw dots at grid intersections
+        dot_size = 2
+        dot_color = "#CCCCCC"  # Light gray
+
+        # Only draw dots in visible area (with some padding)
+        for x in range(0, canvas_width, spacing):
+            for y in range(0, canvas_height, spacing):
+                self.canvas.create_oval(
+                    x - dot_size, y - dot_size,
+                    x + dot_size, y + dot_size,
+                    fill=dot_color,
+                    outline="",
+                    tags=("grid_overlay",)
+                )
+
     def redraw_all(self):
         """Redraw entire canvas"""
         self.canvas.delete("all")
+
+        # Draw grid overlay if enabled (behind everything)
+        if self.grid_enabled and self.settings.show_grid_overlay:
+            self.draw_grid_overlay()
 
         # Draw connections first (behind nodes)
         for conn in self.connections.values():
@@ -607,6 +643,19 @@ class MindMapApp:
                 tags=base_tags
             )
             node.canvas_items.insert(0, highlight)  # Add to front
+
+        # Add drop target highlight (green pulsing border)
+        if self.drop_target_node and node.id == self.drop_target_node:
+            width, height = style.width, style.height
+            drop_highlight = self.canvas.create_rectangle(
+                node.x - width//2 - 5, node.y - height//2 - 5,
+                node.x + width//2 + 5, node.y + height//2 + 5,
+                outline="#4CAF50",  # Green
+                width=4,
+                dash=(5, 3),  # Dashed line
+                tags=base_tags
+            )
+            node.canvas_items.insert(0, drop_highlight)  # Add to front
 
     def draw_connection(self, conn):
         """Draw a connection between nodes using theme system"""
@@ -681,12 +730,24 @@ class MindMapApp:
             )
 
     def draw_drawer(self, drawer_name, label):
-        """Draw a single drawer"""
+        """Draw a single drawer with animation effects"""
         bounds = self.cabinet.get_drawer_bounds(drawer_name)
         x1, y1, x2, y2 = bounds
 
         # Drawer color (slightly lighter than cabinet)
         drawer_color = "#A1887F"
+
+        # Highlight color if this drawer was recently clicked (animation effect)
+        if self.cabinet.animated_drawer == drawer_name and self.cabinet.animation_frame > 0:
+            # Glow effect - bright highlight
+            glow_offset = 3
+            self.canvas.create_rectangle(
+                x1 - glow_offset, y1 - glow_offset,
+                x2 + glow_offset, y2 + glow_offset,
+                outline="#FFC107",  # Amber glow
+                width=3,
+                tags=(f"drawer_{drawer_name}_glow", "drawer", "cabinet")
+            )
 
         # Draw drawer
         self.canvas.create_rectangle(
@@ -918,23 +979,36 @@ class MindMapApp:
             tags=("manila_content", "manila")
         )
 
-        theme_text = "Default" if self.theme == "default" else "Dark"
-        self.canvas.create_rectangle(
-            x + 150, start_y - 10,
-            x + 250, start_y + 15,
-            fill="#2196F3",
-            outline="#424242",
-            width=2,
-            tags=("manila_theme_toggle", "manila_button", "manila")
-        )
+        # Get all available themes
+        available_themes = self.theme_registry.list_themes()
+        current_theme = self.theme_registry.current_theme_name
 
-        self.canvas.create_text(
-            x + 200, start_y + 2,
-            text=theme_text,
-            font=("Arial", 11, "bold"),
-            fill="white",
-            tags=("manila_theme_toggle", "manila_button", "manila")
-        )
+        # Draw buttons for each theme
+        btn_x_start = x + 30
+        btn_y_theme = start_y + 25
+        for i, theme_name in enumerate(available_themes):
+            btn_x = btn_x_start + i * 110
+            is_active = (theme_name == current_theme)
+
+            # Button color: blue if active, gray if inactive
+            btn_color = "#2196F3" if is_active else "#9E9E9E"
+
+            self.canvas.create_rectangle(
+                btn_x, btn_y_theme,
+                btn_x + 100, btn_y_theme + 30,
+                fill=btn_color,
+                outline="#424242",
+                width=2,
+                tags=(f"manila_theme_{theme_name}", "manila_button", "manila")
+            )
+
+            self.canvas.create_text(
+                btn_x + 50, btn_y_theme + 15,
+                text=theme_name.capitalize(),
+                font=("Arial", 10, "bold"),
+                fill="white",
+                tags=(f"manila_theme_{theme_name}", "manila_button", "manila")
+            )
 
         # Export section
         start_y += 60
@@ -1041,6 +1115,16 @@ class MindMapApp:
 
         # Update status to show grid mode
         self.update_status()
+
+    def toggle_grid_overlay(self):
+        """Toggle grid overlay visualization on/off"""
+        self.settings.show_grid_overlay = not self.settings.show_grid_overlay
+        self.settings.save()
+
+        mode = "Grid Overlay ON" if self.settings.show_grid_overlay else "Grid Overlay OFF"
+        print(f"Grid overlay: {mode}")
+
+        self.redraw_all()
 
     # ========================================================================
     # AUTO-SAVE SYSTEM
@@ -1153,7 +1237,7 @@ class MindMapApp:
                     return
 
     def on_canvas_drag(self, event):
-        """Handle canvas drag with optional grid snapping"""
+        """Handle canvas drag with optional grid snapping and reparenting detection"""
         if self.drag_data["item"] is None:
             return
 
@@ -1174,7 +1258,33 @@ class MindMapApp:
                 node.x = new_x
                 node.y = new_y
 
-                self.redraw_all()
+                # Check if hovering over another node for reparenting
+                old_drop_target = self.drop_target_node
+                self.drop_target_node = None
+
+                for other_id, other_node in self.nodes.items():
+                    if other_id == node_id:
+                        continue
+
+                    # Check if cursor is within node bounds
+                    theme = self.theme_registry.get_current()
+                    tier = other_node.calculate_tier()
+                    style = theme.get_node_style(tier, other_node.completed)
+
+                    dx = abs(event.x - other_node.x)
+                    dy = abs(event.y - other_node.y)
+
+                    if dx < style.width / 2 and dy < style.height / 2:
+                        # Prevent circular references (can't parent to own descendant)
+                        if not self.is_ancestor(node_id, other_id):
+                            self.drop_target_node = other_id
+                            break
+
+                # Redraw if drop target changed
+                if old_drop_target != self.drop_target_node:
+                    self.redraw_all()
+                else:
+                    self.redraw_all()
 
         elif self.drag_data["type"] == "cabinet":
             # Move cabinet
@@ -1190,8 +1300,21 @@ class MindMapApp:
             self.drag_data["y"] = event.y
 
     def on_canvas_release(self, event):
-        """Handle mouse release"""
+        """Handle mouse release and perform reparenting if applicable"""
+        # Check if we're dropping a node onto another node
+        if self.drag_data["type"] == "node" and self.drop_target_node:
+            dragged_node_id = self.drag_data["item"]
+            new_parent_id = self.drop_target_node
+
+            # Perform reparenting
+            if dragged_node_id in self.nodes and new_parent_id in self.nodes:
+                self.reparent_node(dragged_node_id, new_parent_id)
+
+            # Clear drop target
+            self.drop_target_node = None
+
         self.drag_data = {"x": 0, "y": 0, "item": None, "type": None}
+        self.redraw_all()
 
     # ========================================================================
     # INTERACTION HANDLERS
@@ -1228,7 +1351,11 @@ class MindMapApp:
         self.redraw_all()
 
     def handle_drawer_click(self, drawer_name):
-        """Handle drawer click"""
+        """Handle drawer click with animation"""
+        # Start animation
+        self.cabinet.animated_drawer = drawer_name
+        self.cabinet.animation_frame = 5  # Will count down
+
         if drawer_name == "top":
             # Top drawer: Create top-tier node
             self.cabinet.toggle_drawer("top")
@@ -1252,6 +1379,18 @@ class MindMapApp:
                 self.manila_folder_open = None
 
         self.redraw_all()
+        # Schedule animation frame updates
+        self.animate_drawer()
+
+    def animate_drawer(self):
+        """Animate drawer glow effect"""
+        if self.cabinet.animation_frame > 0:
+            self.cabinet.animation_frame -= 1
+            self.redraw_all()
+            # Schedule next frame
+            self.root.after(50, self.animate_drawer)  # 50ms per frame
+        else:
+            self.cabinet.animated_drawer = None
 
     def handle_manila_folder_click(self, x, y):
         """Handle manila folder clicks"""
@@ -1280,13 +1419,22 @@ class MindMapApp:
             # Settings folder - buttons
             if "manila_autosave_toggle" in tags:
                 self.auto_save_enabled = not self.auto_save_enabled
+                self.settings.auto_save_enabled = self.auto_save_enabled
+                self.settings.save()
+                self.setup_auto_save()  # Restart auto-save with new setting
                 self.redraw_all()
                 return True
 
-            if "manila_theme_toggle" in tags:
-                self.theme = "dark" if self.theme == "default" else "default"
-                self.redraw_all()
-                return True
+            # Theme switching - check for specific theme buttons
+            for theme_name in self.theme_registry.list_themes():
+                if f"manila_theme_{theme_name}" in tags:
+                    # Switch to this theme
+                    if self.theme_registry.set_current(theme_name):
+                        self.settings.current_theme = theme_name
+                        self.settings.save()
+                        print(f"Switched to {theme_name} theme")
+                        self.redraw_all()
+                    return True
 
             # Export buttons
             if "manila_export_csv" in tags:
@@ -1408,24 +1556,70 @@ class MindMapApp:
         return node_id
 
     def edit_node(self, node_id):
-        """Edit node content"""
+        """Edit node content with in-place Entry widget overlay"""
         if node_id not in self.nodes:
             return
 
         node = self.nodes[node_id]
 
-        # Show edit dialog (using helper to ensure it appears on top)
-        new_content = self.show_dialog_topmost(
-            simpledialog.askstring,
-            "Edit Node",
-            "Enter node content:",
-            initialvalue=node.content,
-            parent=self.root
+        # Create overlay Entry widget
+        theme = self.theme_registry.get_current()
+        tier = node.calculate_tier()
+        style = theme.get_node_style(tier, node.completed)
+
+        # Position entry at node location
+        entry_width = style.width + 20
+        entry = tk.Entry(
+            self.root,
+            font=(style.font_family, style.font_size),
+            justify='center',
+            width=max(15, len(node.content) + 5)
+        )
+        entry.insert(0, node.content)
+        entry.select_range(0, tk.END)
+
+        # Create window on canvas at node position
+        window_id = self.canvas.create_window(
+            node.x, node.y,
+            window=entry,
+            tags=("edit_overlay",)
         )
 
-        if new_content is not None:
-            node.content = new_content
-            self.save_undo_state()
+        # Store reference for cleanup
+        self.edit_overlay = {
+            'node_id': node_id,
+            'entry': entry,
+            'window_id': window_id
+        }
+
+        # Bind keys
+        def save_edit(event=None):
+            new_content = entry.get().strip()
+            if new_content:
+                node.content = new_content
+                self.save_undo_state()
+            self.cancel_edit()
+
+        def cancel_edit_handler(event=None):
+            self.cancel_edit()
+
+        entry.bind('<Return>', save_edit)
+        entry.bind('<KP_Enter>', save_edit)  # Numpad Enter
+        entry.bind('<Escape>', cancel_edit_handler)
+        entry.bind('<FocusOut>', save_edit)  # Save when clicking away
+
+        # Focus and select all
+        entry.focus_set()
+
+    def cancel_edit(self):
+        """Cancel in-place editing and cleanup overlay"""
+        if hasattr(self, 'edit_overlay') and self.edit_overlay:
+            try:
+                self.canvas.delete(self.edit_overlay['window_id'])
+                self.edit_overlay['entry'].destroy()
+            except:
+                pass
+            self.edit_overlay = None
             self.redraw_all()
 
     def delete_node(self, node_id):
@@ -1487,6 +1681,60 @@ class MindMapApp:
             content="Child Node",
             parent_id=parent_id
         )
+
+    def is_ancestor(self, potential_ancestor_id, node_id):
+        """Check if potential_ancestor_id is an ancestor of node_id (prevents circular refs)"""
+        if node_id not in self.nodes:
+            return False
+
+        current = self.nodes[node_id]
+        visited = set()
+
+        while current.parent_id:
+            if current.parent_id == potential_ancestor_id:
+                return True
+            if current.parent_id in visited:  # Circular reference protection
+                return False
+            visited.add(current.parent_id)
+            if current.parent_id not in self.nodes:
+                break
+            current = self.nodes[current.parent_id]
+
+        return False
+
+    def reparent_node(self, node_id, new_parent_id):
+        """Change the parent of a node"""
+        if node_id not in self.nodes or new_parent_id not in self.nodes:
+            return
+
+        # Prevent self-parenting or circular references
+        if node_id == new_parent_id or self.is_ancestor(node_id, new_parent_id):
+            print(f"Cannot reparent: would create circular reference")
+            return
+
+        node = self.nodes[node_id]
+        new_parent = self.nodes[new_parent_id]
+
+        # Remove from old parent's children list
+        if node.parent_id and node.parent_id in self.nodes:
+            old_parent = self.nodes[node.parent_id]
+            if node_id in old_parent.children_ids:
+                old_parent.children_ids.remove(node_id)
+
+        # Add to new parent's children list
+        if node_id not in new_parent.children_ids:
+            new_parent.children_ids.append(node_id)
+
+        # Update parent reference
+        node.parent_id = new_parent_id
+
+        # Update tier to be child of new parent
+        node.tier = min(5, new_parent.tier + 1)
+
+        print(f"Reparented '{node.content}' to '{new_parent.content}'")
+
+        self.save_undo_state()
+        self.redraw_all()
 
     def toggle_collapse(self, node_id):
         """Toggle node collapse state"""
