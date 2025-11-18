@@ -605,9 +605,12 @@ class MindMapApp:
         self.update_status()
 
     def draw_node(self, node):
-        """Draw a single node using theme system"""
-        if node.collapsed and node.parent_id:
-            return  # Don't draw collapsed child nodes
+        """Draw a single node using theme system (FIXED: Bug #6 - respect collapsed parents)"""
+        # CRITICAL: Don't draw if parent is collapsed
+        if node.parent_id and node.parent_id in self.nodes:
+            parent = self.nodes[node.parent_id]
+            if parent.collapsed:
+                return  # Don't draw children of collapsed nodes
 
         # Clear old canvas items for this node
         for item_id in node.canvas_items:
@@ -798,13 +801,14 @@ class MindMapApp:
             tags=(f"drawer_{drawer_name}", "drawer", "cabinet")
         )
 
-        # Draw label
-        label_y = y1 - 8
+        # Draw label (FIXED: Bug #8 - position above drawer, white for visibility)
+        label_x = (x1 + x2) / 2
+        label_y = y1 - 10  # 10 pixels above drawer top for better visibility
         self.canvas.create_text(
-            (x1 + x2) / 2, label_y,
+            label_x, label_y,
             text=label,
-            font=("Arial", 8, "bold"),
-            fill="#424242",
+            font=("Arial", 10, "bold"),
+            fill="#FFFFFF",  # White for visibility (was #424242 dark gray)
             tags=("cabinet_label", "cabinet")
         )
 
@@ -1772,15 +1776,21 @@ class MindMapApp:
         self.redraw_all()
 
     def toggle_collapse(self, node_id):
-        """Toggle node collapse state"""
+        """Toggle node collapse state (FIXED: Bug #6 - hides/shows children)"""
         if node_id not in self.nodes:
             return
 
         node = self.nodes[node_id]
         node.collapsed = not node.collapsed
 
+        # Save undo state
         self.save_undo_state()
+
+        # Redraw (children will be hidden/shown by draw_node logic)
         self.redraw_all()
+
+        state = "collapsed" if node.collapsed else "expanded"
+        print(f"Node '{node.content}' {state}")
 
     def change_node_tier(self, node_id):
         """Change node tier"""
