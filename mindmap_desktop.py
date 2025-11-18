@@ -410,6 +410,9 @@ class MindMapApp:
         # NEW: Drag-drop reparenting state
         self.drop_target_node = None  # Node currently being hovered over during drag
 
+        # NEW: In-place editing state (prevents redraw interference)
+        self.currently_editing_node = None
+
         # UI setup
         self.setup_canvas()
         self.setup_menu()
@@ -572,7 +575,11 @@ class MindMapApp:
                 )
 
     def redraw_all(self):
-        """Redraw entire canvas"""
+        """Redraw entire canvas (FIXED: Bug #2 - skip if editing)"""
+        # DON'T redraw if currently editing (prevents destroying edit widget)
+        if self.currently_editing_node:
+            return
+
         self.canvas.delete("all")
 
         # Draw grid overlay if enabled (behind everything)
@@ -656,6 +663,26 @@ class MindMapApp:
                 tags=base_tags
             )
             node.canvas_items.insert(0, drop_highlight)  # Add to front
+
+        # CRITICAL FIX (Bug #1): Draw connection to cabinet for top-level nodes
+        if node.parent_id is None or node.parent_id == "":
+            # This is a top-level node - connect to cabinet drawer
+            connection_style = theme.get_connection_style()
+
+            # Get cabinet top drawer center position
+            cabinet_center_x = self.cabinet.x + self.cabinet.width // 2
+            cabinet_drawer_y = self.cabinet.y + 30  # Top of first drawer
+
+            # Draw connection from cabinet to node using theme
+            connection_items = theme.draw_connection(
+                self.canvas,
+                cabinet_center_x, cabinet_drawer_y,
+                node.x, node.y,
+                connection_style,
+                tags=('cabinet_connection', f"node_{node.id}")
+            )
+            # Add connection items to node's canvas items for cleanup
+            node.canvas_items.extend(connection_items)
 
     def draw_connection(self, conn):
         """Draw a connection between nodes using theme system"""
@@ -1556,70 +1583,63 @@ class MindMapApp:
         return node_id
 
     def edit_node(self, node_id):
-        """Edit node content with in-place Entry widget overlay"""
+        """Edit node content with in-place Entry widget overlay (FIXED: Bug #2)"""
         if node_id not in self.nodes:
             return
 
+        # Prevent multiple simultaneous edits
+        if self.currently_editing_node:
+            return
+
         node = self.nodes[node_id]
+        self.currently_editing_node = node_id
 
-        # Create overlay Entry widget
-        theme = self.theme_registry.get_current()
-        tier = node.calculate_tier()
-        style = theme.get_node_style(tier, node.completed)
-
-        # Position entry at node location
-        entry_width = style.width + 20
+        # Create entry widget directly on canvas
         entry = tk.Entry(
-            self.root,
-            font=(style.font_family, style.font_size),
+            self.canvas,
+            font=('Arial', 12),
             justify='center',
-            width=max(15, len(node.content) + 5)
+            width=20
         )
         entry.insert(0, node.content)
         entry.select_range(0, tk.END)
 
-        # Create window on canvas at node position
+        # Position on canvas
         window_id = self.canvas.create_window(
             node.x, node.y,
             window=entry,
-            tags=("edit_overlay",)
+            tags='edit_overlay'
         )
+        entry.focus_set()
 
-        # Store reference for cleanup
-        self.edit_overlay = {
-            'node_id': node_id,
-            'entry': entry,
-            'window_id': window_id
-        }
-
-        # Bind keys
         def save_edit(event=None):
             new_content = entry.get().strip()
             if new_content:
                 node.content = new_content
                 self.save_undo_state()
-            self.cancel_edit()
 
-        def cancel_edit_handler(event=None):
-            self.cancel_edit()
+            # Clean up
+            self.canvas.delete('edit_overlay')
+            self.currently_editing_node = None
+            self.redraw_all()
 
+        def cancel_edit(event=None):
+            self.canvas.delete('edit_overlay')
+            self.currently_editing_node = None
+            self.redraw_all()
+
+        # Bind events
         entry.bind('<Return>', save_edit)
-        entry.bind('<KP_Enter>', save_edit)  # Numpad Enter
-        entry.bind('<Escape>', cancel_edit_handler)
-        entry.bind('<FocusOut>', save_edit)  # Save when clicking away
-
-        # Focus and select all
-        entry.focus_set()
+        entry.bind('<KP_Enter>', save_edit)
+        entry.bind('<Escape>', cancel_edit)
+        entry.bind('<FocusOut>', save_edit)
 
     def cancel_edit(self):
-        """Cancel in-place editing and cleanup overlay"""
-        if hasattr(self, 'edit_overlay') and self.edit_overlay:
-            try:
-                self.canvas.delete(self.edit_overlay['window_id'])
-                self.edit_overlay['entry'].destroy()
-            except:
-                pass
-            self.edit_overlay = None
+        """Cancel in-place editing and cleanup overlay (DEPRECATED - now handled inline)"""
+        # This method is now deprecated but kept for compatibility
+        if self.currently_editing_node:
+            self.canvas.delete('edit_overlay')
+            self.currently_editing_node = None
             self.redraw_all()
 
     def delete_node(self, node_id):
@@ -1703,7 +1723,7 @@ class MindMapApp:
         return False
 
     def reparent_node(self, node_id, new_parent_id):
-        """Change the parent of a node"""
+        """Change the parent of a node (FIXED: Bug #4 - creates connections)"""
         if node_id not in self.nodes or new_parent_id not in self.nodes:
             return
 
@@ -1721,12 +1741,27 @@ class MindMapApp:
             if node_id in old_parent.children_ids:
                 old_parent.children_ids.remove(node_id)
 
+        # FIX: Delete old connection if it exists
+        for conn_id in list(self.connections.keys()):
+            conn = self.connections[conn_id]
+            if conn.to_node_id == node_id:
+                del self.connections[conn_id]
+
+        # Update parent reference
+        node.parent_id = new_parent_id
+
         # Add to new parent's children list
         if node_id not in new_parent.children_ids:
             new_parent.children_ids.append(node_id)
 
-        # Update parent reference
-        node.parent_id = new_parent_id
+        # FIX: Create new connection from parent to child
+        conn_id = f"conn_{new_parent_id}_{node_id}"
+        self.connections[conn_id] = Connection(
+            conn_id=conn_id,
+            from_node_id=new_parent_id,
+            to_node_id=node_id,
+            conn_type="hierarchical"
+        )
 
         # Update tier to be child of new parent
         node.tier = min(5, new_parent.tier + 1)

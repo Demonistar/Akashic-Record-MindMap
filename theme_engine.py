@@ -285,15 +285,18 @@ class CemeteryTheme(Theme):
             )
             items.append(rect)
 
-        # Text (always on top)
+        # Text (FIXED: Bug #3 - place INSIDE gravestone, not below)
         # Truncate text if too long
         display_text = text if len(text) <= 15 else text[:12] + "..."
 
+        # Place text INSIDE the gravestone at CENTER for visibility
         text_item = canvas.create_text(
-            x, y + h//2 + 15,
-            text=display_text, fill=style.text_color,
-            font=(style.font_family, style.font_size),
-            tags=tags
+            x, y,  # CENTER of gravestone, not below (was y + h//2 + 15)
+            text=display_text,
+            fill='#FFFFFF',  # Always white for visibility (was style.text_color)
+            font=(style.font_family, style.font_size, 'bold'),
+            tags=tags,
+            width=w - 20  # Word wrap within gravestone
         )
         items.append(text_item)
 
