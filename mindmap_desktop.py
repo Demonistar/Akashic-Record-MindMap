@@ -901,15 +901,32 @@ class MindMapApp:
             tags=("manila_content", "manila")
         )
 
-        # Find recent .json files
+        # Find recent .json files (FIXED: Bug #7 - exclude settings.json)
         import glob
         json_files = glob.glob("*.json")
-        json_files.sort(key=os.path.getmtime, reverse=True)
-        recent_files = json_files[:4]
+        # Filter to only include actual project files (not settings.json)
+        project_files = [
+            f for f in json_files
+            if 'settings.json' not in f.lower()  # Exclude settings
+            and os.path.exists(f)  # File must exist
+        ]
+        project_files.sort(key=os.path.getmtime, reverse=True)
+        recent_files = project_files[:4]
 
         # Draw file list
         start_y = y + 80
         self.manila_folder_items = []
+
+        # Show "No recent projects" if list is empty
+        if not recent_files:
+            self.canvas.create_text(
+                x + width // 2, start_y + 50,
+                text="No recent projects",
+                font=("Arial", 12, "italic"),
+                fill="#888888",
+                tags=("manila_content", "manila")
+            )
+            return
 
         for i, filename in enumerate(recent_files):
             item_y = start_y + i * 60
@@ -999,8 +1016,54 @@ class MindMapApp:
             tags=("manila_autosave_toggle", "manila_button", "manila")
         )
 
+        # Auto-save interval selector (FIXED: Bug #9)
+        start_y += 40
+        self.canvas.create_text(
+            x + 30, start_y,
+            text="Auto-Save Interval:",
+            font=("Arial", 11),
+            fill="#424242",
+            anchor="w",
+            tags=("manila_content", "manila")
+        )
+
+        # Interval options: 15s, 30s, 60s, 120s (2m), 300s (5m)
+        intervals = [("15s", 15), ("30s", 30), ("60s", 60), ("2m", 120), ("5m", 300)]
+        current_interval = self.settings.auto_save_interval
+
+        button_x = x + 30
+        button_y = start_y + 25
+        for i, (label, seconds) in enumerate(intervals):
+            btn_x = button_x + (i * 70)
+
+            # Highlight current interval
+            if current_interval == seconds:
+                color = "#4CAF50"  # Green
+                text_color = "white"
+            else:
+                color = "#E0E0E0"  # Gray
+                text_color = "#424242"
+
+            # Draw button
+            self.canvas.create_rectangle(
+                btn_x, button_y,
+                btn_x + 60, button_y + 25,
+                fill=color,
+                outline="#424242",
+                width=2,
+                tags=(f"manila_interval_{seconds}", "manila_button", "manila")
+            )
+
+            self.canvas.create_text(
+                btn_x + 30, button_y + 12,
+                text=label,
+                font=("Arial", 9, "bold"),
+                fill=text_color,
+                tags=(f"manila_interval_{seconds}", "manila_button", "manila")
+            )
+
         # Theme selector
-        start_y += 60
+        start_y += 70
         self.canvas.create_text(
             x + 30, start_y,
             text="Theme:",
@@ -1467,6 +1530,16 @@ class MindMapApp:
                         self.redraw_all()
                     return True
 
+            # Auto-save interval buttons (FIXED: Bug #9)
+            for seconds in [15, 30, 60, 120, 300]:
+                if f"manila_interval_{seconds}" in tags:
+                    self.settings.auto_save_interval = seconds
+                    self.settings.save()
+                    self.setup_auto_save()  # Restart timer with new interval
+                    print(f"Auto-save interval set to {seconds} seconds")
+                    self.redraw_all()
+                    return True
+
             # Export buttons
             if "manila_export_csv" in tags:
                 self.export_to_csv()
@@ -1535,7 +1608,7 @@ class MindMapApp:
             menu.add_cascade(label="Arrange Children", menu=arrange_menu)
 
         menu.add_command(label="Collapse", command=lambda: self.toggle_collapse(node_id))
-        menu.add_command(label="Change Tier", command=lambda: self.change_node_tier(node_id))
+        # NOTE: "Change Tier" removed (Bug #5) - tier is now auto-calculated from children count
 
         menu.add_separator()
 
@@ -1979,15 +2052,27 @@ class MindMapApp:
         tk.Button(dialog, text="Cancel", command=dialog.destroy).pack(pady=5)
 
     def calculate_link_suggestions(self, node):
-        """Calculate link suggestions based on similarity"""
+        """Calculate link suggestions based on similarity (FIXED: Bug #10 - filter existing connections)"""
         suggestions = []
+
+        # Build set of already-connected nodes
+        existing_connections = set()
+        for conn in self.connections.values():
+            if conn.from_node_id == node.id:
+                existing_connections.add(conn.to_node_id)
+            if conn.to_node_id == node.id:
+                existing_connections.add(conn.from_node_id)
 
         for other_id, other_node in self.nodes.items():
             if other_id == node.id:
                 continue
 
-            # Skip if already linked
+            # Skip if already linked via linked_node_ids
             if other_id in node.linked_node_ids:
+                continue
+
+            # FIXED: Skip if already connected via connections
+            if other_id in existing_connections:
                 continue
 
             score = 0
